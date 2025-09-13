@@ -95,8 +95,9 @@ def main(ctx: click.Context, db_path: Path) -> None:
     default=None,
     help="Path to JSON file for initial input model.",
 )
+@click.option("--resume", type=str, default=None, help="Resume from an existing run_id checkpoint.")
 @click.pass_context
-def run(ctx: click.Context, graph_path: Optional[Path], demo: bool, input_json: Optional[str], input_file: Optional[Path]) -> None:
+def run(ctx: click.Context, graph_path: Optional[Path], demo: bool, input_json: Optional[str], input_file: Optional[Path], resume: Optional[str]) -> None:
     """Run a graph. Provide GRAPH_PATH (Python file) or use --demo."""
     db_path: Path = ctx.obj["db_path"]
     persistence = SQLitePersistence(db_path)
@@ -108,22 +109,27 @@ def run(ctx: click.Context, graph_path: Optional[Path], demo: bool, input_json: 
             raise click.UsageError("Provide GRAPH_PATH or use --demo")
         graph, input_model = _build_graph_from_file(graph_path)
 
-    # Load initial input
-    data: dict[str, Any]
-    if input_file:
-        data = json.loads(Path(input_file).read_text(encoding="utf-8"))
-    elif input_json:
-        data = json.loads(input_json)
+    # Load initial input unless resuming
+    if resume:
+        initial = None  # type: ignore[assignment]
     else:
-        # Best-effort default for demo
-        data = {"text": "hello orca"}
-
-    adapter = TypeAdapter(input_model)
-    initial = adapter.validate_python(data)
+        data: dict[str, Any]
+        if input_file:
+            data = json.loads(Path(input_file).read_text(encoding="utf-8"))
+        elif input_json:
+            data = json.loads(input_json)
+        else:
+            # Best-effort default for demo
+            data = {"text": "hello orca"}
+        adapter = TypeAdapter(input_model)
+        initial = adapter.validate_python(data)
 
     async def _do_run() -> None:
         runner = GraphRunner(persistence=persistence)
-        result = await runner.run(graph, initial)
+        if resume:
+            result = await runner.run(graph, initial, resume_from_checkpoint=resume)
+        else:
+            result = await runner.run(graph, initial)
         click.echo(json.dumps({
             "run_id": result.run_id,
             "status": result.status,
