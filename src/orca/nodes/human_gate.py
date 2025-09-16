@@ -4,9 +4,9 @@ from typing import Generic, Type, TypeVar
 
 from pydantic import BaseModel
 
-from ..core.node import Node
-from ..core.state import RunState
-from ..core.errors import HumanInputRequired
+from orca.core.node import Node
+from orca.core.state import RunState
+from orca.core.errors import HumanInputRequired
 
 I = TypeVar("I", bound=BaseModel)
 O = TypeVar("O", bound=BaseModel)

@@ -3,14 +3,13 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from pydantic import TypeAdapter
 
-from ..core.events import Event
-from .base import Persistence, RunRecord
+from orca.core.events import Event
+from orca.persistence.base import Persistence, RunRecord
 
 
 DEFAULT_DB_DIR = Path(os.getenv("ORCA_DB_DIR", ".orca"))
@@ -102,7 +101,7 @@ class SQLitePersistence(Persistence):
             (run_id,),
         ).fetchone()
         if row:
-            return (row["node"], row["state_json"])  # type: ignore[return-value]
+            return row["node"], row["state_json"]  # type: ignore[return-value]
         return None
 
     def add_event(self, event: Event) -> None:

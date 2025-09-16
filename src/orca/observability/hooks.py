@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Callable, List
 
-from ..core.events import Event
+from orca.core.events import Event
 
 
 _EVENT_HANDLERS: List[Callable[[Event], None]] = []

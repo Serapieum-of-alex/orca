@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import abc
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Protocol
 
-from ..core.events import Event
+from orca.core.events import Event
 
 
 @dataclass(slots=True)

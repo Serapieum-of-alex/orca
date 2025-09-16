@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Generic, Iterable, List, Sequence, Type, TypeVar
+from typing import Generic, Type, TypeVar
 
 from pydantic import BaseModel
 
-from ..core.node import Node
-from ..core.state import RunState
+from orca.core.node import Node
+from orca.core.state import RunState
 
 I = TypeVar("I", bound=BaseModel)
 O = TypeVar("O", bound=BaseModel)
