@@ -162,13 +162,15 @@ class Graph:
                 ```python
                 >>> from pydantic import BaseModel
                 >>> from orca.core.state import RunState
+                >>> from orca.core.node import Node
                 >>> class I(BaseModel):
                 ...     v: int
-                >>> from orca.core.node import Node
                 >>> class N(Node[I, I]):
                 ...     async def run(self, input: I, state: RunState) -> I:  # noqa: A003
                 ...         return input
-                >>> g = Graph(); g.add_node(N("a", I, I)); g.add_node(N("b", I, I))
+                >>> g = Graph()
+                >>> g.add_node(N("a", I, I))
+                >>> g.add_node(N("b", I, I))
                 >>> g.connect("a", "b")
                 >>> print(g.edges[0].src, g.edges[0].dst)
                 a b
@@ -230,13 +232,14 @@ class Graph:
                 >>> from pydantic import BaseModel
                 >>> from orca.core.errors import ValidationError
                 >>> from orca.core.state import RunState
+                >>> from orca.core.node import Node
                 >>> class I(BaseModel):
                 ...     v: int
-                >>> from orca.core.node import Node
                 >>> class N(Node[I, I]):
                 ...     async def run(self, input: I, state: RunState) -> I:  # noqa: A003
                 ...         return input
-                >>> g = Graph(); g.add_node(N("n", I, I))
+                >>> g = Graph()
+                >>> g.add_node(N("n", I, I))
                 >>> try:
                 ...     g.validate()
                 ... except ValidationError:
