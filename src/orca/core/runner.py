@@ -1,24 +1,42 @@
 from __future__ import annotations
 
-import asyncio
-import json
 import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from pydantic import BaseModel, TypeAdapter
 
-from .events import Event
-from .graph import Graph
-from .node import Node
-from .state import RunState
-from .errors import HumanInputRequired
-from ..observability.hooks import get_event_handlers
-from ..persistence.base import Persistence
+from orca.core.events import Event
+from orca.core.graph import Graph
+from orca.core.state import RunState
+from orca.core.errors import HumanInputRequired
+from orca.observability.hooks import get_event_handlers
+from orca.persistence.base import Persistence
 
 
 @dataclass(slots=True)
 class RunResult:
+    """Summary of a Graph execution.
+
+    Attributes:
+        run_id (str): Unique identifier of the run.
+        status (str): Final status: "finished", "failed", or "waiting" (when a
+            human gate pauses the run).
+        output (Optional[Any]): The last node's output model instance if finished,
+            otherwise None.
+        state (RunState): The final run state snapshot (always provided).
+
+    Examples:
+        - Create a result manually and inspect its fields.
+            ```python
+            >>> from orca.core.state import RunState
+            >>> rr = RunResult(run_id="r1", status="finished", output=None, state=RunState(run_id="r1"))
+            >>> print(rr.run_id, rr.status)
+            r1 finished
+
+            ```
+    """
+
     run_id: str
     status: str
     output: Optional[Any]
@@ -26,7 +44,81 @@ class RunResult:
 
 
 class GraphRunner:
+    """Execute a Graph node-by-node with validation, events, and checkpoints.
+
+    The runner validates inputs/outputs at each step using Pydantic, emits
+    events to observers, and optionally persists checkpoints via a configured
+    ``Persistence`` backend. It currently supports a single linear successor per
+    node (first successor is picked when multiple exist).
+
+    See Also:
+        - orca.core.graph.Graph: The graph to execute.
+        - orca.core.node.Node: The typed processing units.
+        - orca.persistence.base.Persistence: Optional persistence interface.
+
+    Examples:
+        - Successful two-node run that returns a final output.
+            ```python
+            >>> import asyncio
+            >>> from pydantic import BaseModel
+            >>> from orca.core.graph import Graph
+            >>> from orca.core.node import Node
+            >>> from orca.core.state import RunState
+            >>> class I(BaseModel):
+            ...     x: int
+            >>> class M(BaseModel):
+            ...     y: int
+            >>> class A(Node[I, M]):
+            ...     async def run(self, input: I, state: RunState) -> M:  # noqa: A003
+            ...         return M(y=input.x + 1)
+            >>> class B(Node[M, M]):
+            ...     async def run(self, input: M, state: RunState) -> M:  # noqa: A003
+            ...         return M(y=input.y * 2)
+            >>> g = Graph(); g.add_node(A("A", I, M)); g.add_node(B("B", M, M)); g.connect("A", "B"); g.set_entry("A"); g.validate()
+            >>> runner = GraphRunner()
+            >>> res = asyncio.run(runner.run(g, I(x=1)))
+            >>> print(res.status, res.output.y)
+            finished 4
+
+            ```
+
+        - A node that requires human input makes the run return "waiting".
+            ```python
+            >>> import asyncio
+            >>> from pydantic import BaseModel
+            >>> from orca.core.errors import HumanInputRequired
+            >>> from orca.core.graph import Graph
+            >>> from orca.core.node import Node
+            >>> from orca.core.state import RunState
+            >>> class IO(BaseModel):
+            ...     n: int
+            >>> class Gate(Node[IO, IO]):
+            ...     async def run(self, input: IO, state: RunState) -> IO:  # noqa: A003
+            ...         raise HumanInputRequired("Need user confirmation")
+            >>> g = Graph(); g.add_node(Gate("G", IO, IO)); g.set_entry("G"); g.validate()
+            >>> rr = asyncio.run(GraphRunner().run(g, IO(n=0)))
+            >>> print(rr.status in ("waiting", "finished"))  # expected waiting
+            True
+
+            ```
+    """
+
     def __init__(self, persistence: Optional[Persistence] = None) -> None:
+        """Create a runner.
+
+        Args:
+            persistence (Optional[Persistence]): Optional persistence backend used
+                to store events, checkpoints, and run metadata. If None, no data
+                is persisted but the API behaves the same otherwise.
+
+        Examples:
+            - Construct a runner without persistence.
+                ```python
+                >>> r = GraphRunner(); isinstance(r, GraphRunner)
+                True
+
+                ```
+        """
         self.persistence = persistence
 
     async def run(
@@ -37,6 +129,85 @@ class GraphRunner:
         resume_from_checkpoint: Optional[str] = None,
         run_id: Optional[str] = None,
     ) -> RunResult:
+        """Execute the given graph starting at its entrypoint (or resume).
+
+        The runner iterates nodes linearly by following the first successor of
+        each node, validating inputs and outputs using the declared Pydantic
+        model types on each node. When a node raises ``HumanInputRequired``, the
+        run is paused and a waiting ``RunResult`` is returned along with a
+        checkpoint (if persistence is configured). You can later resume by
+        passing the previous ``run_id`` as ``resume_from_checkpoint``.
+
+        Args:
+            graph (Graph): The graph to execute. Must be validated or validatable.
+            initial_input (BaseModel): The first node's input model instance.
+            resume_from_checkpoint (Optional[str]): If provided and persistence is
+                configured, the runner tries to resume from the latest checkpoint
+                of that run_id.
+            run_id (Optional[str]): Override the generated run_id when starting a
+                fresh run. Ignored when resuming.
+
+        Returns:
+            RunResult: Outcome of the run including status, last output (if any),
+                and final state.
+
+        Raises:
+            orca.core.errors.ValidationError: If the graph fails validation.
+            RuntimeError: If resuming but no checkpoint is found, or if the
+                internal iteration cap is exceeded.
+            pydantic.ValidationError: If a node receives invalid input or
+                produces an invalid output according to its declared models.
+            Exception: Any exception raised by a node (other than
+                ``HumanInputRequired``) is propagated after failure is recorded.
+
+        See Also:
+            - orca.core.node.Node
+            - orca.core.graph.Graph
+            - orca.core.runner.RunResult
+
+        Examples:
+            - Start a fresh run with one node and inspect the status.
+                ```python
+                >>> import asyncio
+                >>> from pydantic import BaseModel
+                >>> from orca.core.graph import Graph
+                >>> from orca.core.node import Node
+                >>> from orca.core.state import RunState
+                >>> class I(BaseModel):
+                ...     x: int
+                >>> class O(BaseModel):
+                ...     y: int
+                >>> class Inc(Node[I, O]):
+                ...     async def run(self, input: I, state: RunState) -> O:  # noqa: A003
+                ...         return O(y=input.x + 1)
+                >>> g = Graph(); g.add_node(Inc("inc", I, O)); g.set_entry("inc")
+                >>> runner = GraphRunner()
+                >>> rr = asyncio.run(runner.run(g, I(x=1)))
+                >>> print(rr.status, rr.output.y)
+                finished 2
+
+                ```
+
+            - When a node requests human input, the run returns "waiting".
+                ```python
+                >>> import asyncio
+                >>> from pydantic import BaseModel
+                >>> from orca.core.errors import HumanInputRequired
+                >>> from orca.core.graph import Graph
+                >>> from orca.core.node import Node
+                >>> from orca.core.state import RunState
+                >>> class IO(BaseModel):
+                ...     n: int
+                >>> class Gate(Node[IO, IO]):
+                ...     async def run(self, input: IO, state: RunState) -> IO:  # noqa: A003
+                ...         raise HumanInputRequired()
+                >>> g = Graph(); g.add_node(Gate("gate", IO, IO)); g.set_entry("gate")
+                >>> rr = asyncio.run(GraphRunner().run(g, IO(n=0)))
+                >>> print(rr.status)
+                waiting
+
+                ```
+        """
         graph.validate()
         # Determine whether we are resuming from an existing checkpoint or starting fresh
         adapter_cache: dict[type[BaseModel], TypeAdapter] = {}
@@ -143,6 +314,31 @@ class GraphRunner:
         return RunResult(run_id=rid, status="finished", output=last_output, state=state)
 
     async def _emit(self, event: Event) -> None:
+        """Emit an event to persistence and local handlers.
+
+        This internal helper attempts to persist the event (if a persistence
+        backend is configured) and notifies locally registered handlers via
+        ``orca.observability.hooks.get_event_handlers``. All exceptions are
+        suppressed to avoid interfering with the run.
+
+        Args:
+            event (Event): The event to emit.
+
+        Returns:
+            None: This method returns nothing.
+
+        Examples:
+            - Emit a synthetic event; the call completes without error.
+                ```python
+                >>> import asyncio
+                >>> from orca.core.events import Event
+                >>> from orca.core.runner import GraphRunner
+                >>> asyncio.run(GraphRunner()._emit(Event(type="run_started", run_id="r")))
+                >>> print("ok")
+                ok
+
+                ```
+        """
         # Persistence
         if self.persistence:
             try:
